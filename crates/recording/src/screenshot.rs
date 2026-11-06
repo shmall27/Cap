@@ -592,6 +592,8 @@ fn try_fast_capture(target: &ScreenCaptureTarget) -> Option<DynamicImage> {
     let start = std::time::Instant::now();
 
     let cg_image = match target {
+        #[cfg(feature = "multi-window")]
+        ScreenCaptureTarget::Windows { .. } => return None,
         ScreenCaptureTarget::Display { id } => {
             let display = scap_targets::Display::from_id(id)?;
             let display_id = display.raw_handle().inner().id;
@@ -1437,6 +1439,10 @@ pub async fn capture_screenshot(target: ScreenCaptureTarget) -> anyhow::Result<D
         use cidre::sc;
 
         let content_filter = match target.clone() {
+            #[cfg(all(target_os = "macos", feature = "multi-window"))]
+            ScreenCaptureTarget::Windows { .. } => {
+                anyhow::bail!("Multiple windows require Studio recording")
+            }
             ScreenCaptureTarget::Display { id } => {
                 let display = scap_targets::Display::from_id(&id)
                     .ok_or_else(|| anyhow!("Display not found"))?;
@@ -1483,6 +1489,10 @@ pub async fn capture_screenshot(target: ScreenCaptureTarget) -> anyhow::Result<D
         };
 
         let width = match target.clone() {
+            #[cfg(all(target_os = "macos", feature = "multi-window"))]
+            ScreenCaptureTarget::Windows { .. } => {
+                anyhow::bail!("Multiple windows require Studio recording")
+            }
             ScreenCaptureTarget::Display { id } => scap_targets::Display::from_id(&id)
                 .and_then(|d| d.physical_size())
                 .map(|s| s.width())
@@ -1501,6 +1511,10 @@ pub async fn capture_screenshot(target: ScreenCaptureTarget) -> anyhow::Result<D
         } as usize;
 
         let height = match target.clone() {
+            #[cfg(all(target_os = "macos", feature = "multi-window"))]
+            ScreenCaptureTarget::Windows { .. } => {
+                anyhow::bail!("Multiple windows require Studio recording")
+            }
             ScreenCaptureTarget::Display { id } => scap_targets::Display::from_id(&id)
                 .and_then(|d| d.physical_size())
                 .map(|s| s.height())

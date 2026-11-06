@@ -9,6 +9,7 @@ workspace = true
 [features]
 default = []
 test-utils = []
+multi-window = []
 memory-profiling = ["dep:dhat"]
 
 [dependencies]

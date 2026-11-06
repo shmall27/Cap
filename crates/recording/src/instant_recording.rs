@@ -1383,6 +1383,11 @@ async fn build_instant_recording_actor(
             .await
             .context("screen capture init")?;
 
+            #[cfg(target_os = "macos")]
+            anyhow::ensure!(
+                !inputs.capture_target.is_multi_window(),
+                "Multiple windows require Studio mode"
+            );
             debug!("screen capture: {screen_source:#?}");
 
             #[cfg(not(target_os = "linux"))]

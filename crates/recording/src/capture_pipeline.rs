@@ -456,6 +456,8 @@ pub fn target_to_display_and_crop(
 
     let crop_bounds = match target {
         ScreenCaptureTarget::Display { .. } => None,
+        #[cfg(all(target_os = "macos", feature = "multi-window"))]
+        ScreenCaptureTarget::Windows { .. } => None,
         ScreenCaptureTarget::Window { id } => {
             let window = Window::from_id(id).ok_or_else(|| anyhow!("Window not found"))?;
 
@@ -594,6 +596,8 @@ pub fn resolve_display_notch(target: &ScreenCaptureTarget) -> Option<cap_project
             resolve_area_display_notch(notch, display_size, *bounds)
         }
         ScreenCaptureTarget::Window { .. } | ScreenCaptureTarget::CameraOnly => None,
+        #[cfg(all(target_os = "macos", feature = "multi-window"))]
+        ScreenCaptureTarget::Windows { .. } => None,
     }
 }
 

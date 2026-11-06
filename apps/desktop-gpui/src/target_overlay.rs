@@ -406,6 +406,7 @@ fn render_thirds(crop: AreaRect) -> impl IntoElement {
 pub struct HoveredWindow {
     pub id: WindowId,
     pub app_name: String,
+    pub title: String,
     pub display_id: DisplayId,
     /// Bounds relative to the display's top-left in capture coordinates;
     /// X11 overlays convert these physical pixels to logical points. Carried as our own
@@ -420,6 +421,7 @@ impl HoveredWindow {
         Some(Self {
             id: window.id(),
             app_name: window.owner_name()?,
+            title: window.name().unwrap_or_default(),
             display_id: window.display()?.id(),
             bounds: AreaRect {
                 x: bounds.position().x() as f32,
@@ -443,6 +445,9 @@ pub struct TargetSelect {
     /// A window locked in by a click (or seeded from the main window's picker),
     /// which the highlight sticks to until another window is clicked.
     pub pinned_window: Option<HoveredWindow>,
+    multiple_windows: bool,
+    selected_windows: Vec<HoveredWindow>,
+    available_windows: Vec<HoveredWindow>,
     microphone_fill: f32,
     /// App icons by window id, fetched once per window.
     icons: HashMap<String, Arc<gpui::Image>>,
@@ -490,6 +495,9 @@ impl TargetSelect {
             cursor_display: None,
             hovered_window: None,
             pinned_window: None,
+            multiple_windows: false,
+            selected_windows: Vec::new(),
+            available_windows: Vec::new(),
             microphone_fill: 0.,
             icons: HashMap::new(),
             arranged: HashMap::new(),
@@ -513,6 +521,11 @@ impl TargetSelect {
         pinned_window: Option<HoveredWindow>,
         cx: &mut Context<Self>,
     ) {
+        if self.mode.is_none() || mode != Some(TargetType::Window) || recording_mode != Mode::Studio
+        {
+            self.multiple_windows = false;
+            self.selected_windows.clear();
+        }
         self.recording_mode = recording_mode;
         self.pinned_window = pinned_window;
         if self.mode.is_none() && mode.is_some() {
@@ -539,6 +552,10 @@ impl TargetSelect {
 
     pub fn set_recording_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         if self.recording_mode != mode {
+            if mode != Mode::Studio {
+                self.multiple_windows = false;
+                self.selected_windows.clear();
+            }
             self.recording_mode = mode;
             cx.notify();
         }
@@ -548,7 +565,11 @@ impl TargetSelect {
     /// selection wins over what the cursor is currently over, matching
     /// `activeWindow = selectedWindow() ?? targetUnderCursor.window`.
     pub fn active_window(&self) -> Option<&HoveredWindow> {
-        self.pinned_window.as_ref().or(self.hovered_window.as_ref())
+        if self.multiple_windows {
+            self.hovered_window.as_ref().or(self.pinned_window.as_ref())
+        } else {
+            self.pinned_window.as_ref().or(self.hovered_window.as_ref())
+        }
     }
 
     pub fn icon_for(&self, id: &WindowId) -> Option<Arc<gpui::Image>> {
@@ -586,9 +607,57 @@ impl TargetSelect {
         }
     }
 
-    /// Lock the highlight onto whatever the cursor is over -- the TSX's
-    /// click-anywhere-to-select behavior. True when that picked a new window.
+    fn toggle_multiple_windows(&mut self, cx: &mut Context<Self>) {
+        let active = self.active_window().cloned();
+        self.multiple_windows = !self.multiple_windows;
+        self.selected_windows.clear();
+        self.available_windows.clear();
+        if self.multiple_windows {
+            if let Some(window) = active {
+                self.selected_windows.push(window);
+            }
+            cx.spawn(async move |this, cx| {
+                let windows = cx
+                    .background_executor()
+                    .spawn(async {
+                        crate::devices::list_window_targets()
+                            .into_iter()
+                            .filter_map(|(_, window)| HoveredWindow::from_window(&window))
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.available_windows = windows;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn toggle_window(&mut self, window: HoveredWindow, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .selected_windows
+            .iter()
+            .position(|selected| selected.id == window.id)
+        {
+            self.selected_windows.remove(index);
+        } else if self.selected_windows.len() < 4 {
+            self.selected_windows.push(window.clone());
+        }
+        self.pinned_window = self.selected_windows.last().cloned();
+        cx.notify();
+    }
+
     fn pin_hovered(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.multiple_windows {
+            if let Some(window) = self.hovered_window.clone() {
+                self.toggle_window(window, cx);
+            }
+            return false;
+        }
         if let Some(hovered) = self.hovered_window.clone()
             && self.pinned_window.as_ref().map(|window| &window.id) != Some(&hovered.id)
         {
@@ -1457,6 +1526,16 @@ impl OverlayWindow {
             });
         }
         let select = self.select.read(cx);
+        #[cfg(target_os = "macos")]
+        if select.multiple_windows && select.recording_mode == Mode::Studio {
+            return (select.selected_windows.len() >= 2).then(|| ScreenCaptureTarget::Windows {
+                ids: select
+                    .selected_windows
+                    .iter()
+                    .map(|window| window.id.clone())
+                    .collect(),
+            });
+        }
         let min = area_min_size(select.recording_mode);
         match select.mode? {
             TargetType::Display => Some(ScreenCaptureTarget::Display {
@@ -2352,6 +2431,9 @@ impl OverlayWindow {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let select = self.select.read(cx);
+        if select.multiple_windows {
+            return self.render_multiple_windows(cx);
+        }
         let focus = select.focus_window && crate::foreign_window::can_arrange();
         let active = select
             .active_window()
@@ -2440,6 +2522,106 @@ impl OverlayWindow {
                             .children(self.render_focus_toggle(cx)),
                     )
                     .child(self.render_controls_cluster(self.target(cx), false, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn render_multiple_windows(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let select = self.select.read(cx);
+        let selected = select.selected_windows.clone();
+        let available = select.available_windows.clone();
+        let hover = select.hovered_window.clone();
+        let theme = self.theme;
+        let on_display = selected
+            .iter()
+            .filter(|window| window.display_id == self.display_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let hover = hover.filter(|window| {
+            window.display_id == self.display_id
+                && !selected.iter().any(|selected| selected.id == window.id)
+        });
+        let choices = available.into_iter().enumerate().map(|(index, window)| {
+            let position = selected
+                .iter()
+                .position(|selected| selected.id == window.id);
+            let prefix = position
+                .map(|index| format!("{}.", index + 1))
+                .unwrap_or_else(|| "+".into());
+            let title = if window.title.is_empty() {
+                window.app_name.clone()
+            } else {
+                format!("{} — {}", window.app_name, window.title)
+            };
+            div()
+                .id(("select-composite-window", index))
+                .cursor_pointer()
+                .px(px(8.))
+                .py(px(6.))
+                .rounded(px(6.))
+                .bg(if position.is_some() {
+                    Hsla::from(theme.gray_5)
+                } else {
+                    gpui::transparent_black()
+                })
+                .text_size(px(12.))
+                .overflow_hidden()
+                .child(format!("{prefix} {title}"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.select
+                        .update(cx, |select, cx| select.toggle_window(window.clone(), cx));
+                }))
+        });
+        div()
+            .size_full()
+            .relative()
+            .bg(gpui::hsla(0., 0., 0., 0.6))
+            .id("multiple-windows-picker")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.select.update(cx, |select, cx| { select.pin_hovered(cx); });
+            }))
+            .children(on_display.iter().chain(hover.iter()).map(|window| {
+                let bounds = window.bounds.scaled(1. / self.capture_scale);
+                let chosen = selected.iter().position(|selected| selected.id == window.id);
+                div()
+                    .absolute()
+                    .left(px(bounds.x))
+                    .top(px(bounds.y))
+                    .w(px(bounds.width))
+                    .h(px(bounds.height))
+                    .border_2()
+                    .border_color(rgb(Theme::TARGET_HIGHLIGHT))
+                    .bg(Theme::with_alpha(rgb(Theme::TARGET_HIGHLIGHT), if chosen.is_some() { 0.3 } else { 0.12 }))
+                    .p(px(12.))
+                    .text_color(gpui::white())
+                    .text_size(px(18.))
+                    .child(chosen.map(|index| format!("Window {}", index + 1)).unwrap_or_else(|| "Click to add window".into()))
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(32.))
+                    .left(px((self.display_size.0 - CLUSTER_WIDTH) / 2.))
+                    .w(px(CLUSTER_WIDTH))
+                    .flex()
+                    .flex_col()
+                    .occlude()
+                    .id("multiple-window-controls")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        self.glass_surface()
+                            .p(px(12.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .text_color(theme.gray_12)
+                            .child(format!("{} / 4 windows selected", selected.len()))
+                            .child(div().text_size(px(12.)).child("Select 2–4 windows in recording order. Two appear side by side; 3–4 use a grid."))
+                            .child(div().id("multiple-window-list").max_h(px(160.)).overflow_y_scroll().children(choices))
+                    )
+                    .child(self.render_controls_cluster(self.target(cx), false, cx))
             )
             .into_any_element()
     }
@@ -4114,6 +4296,32 @@ impl OverlayWindow {
             // The cluster sits on top of the area overlay's drawing surface;
             // without this a click on Start would also start a new crop.
             .occlude()
+            .when(
+                cfg!(target_os = "macos")
+                    && mode == Mode::Studio
+                    && self.select.read(cx).mode == Some(TargetType::Window),
+                |cluster| {
+                    cluster.child(
+                        self.glass_surface()
+                            .p(px(10.))
+                            .id("toggle-multiple-windows")
+                            .cursor_pointer()
+                            .text_color(theme.gray_12)
+                            .text_size(px(13.))
+                            .child(if self.select.read(cx).multiple_windows {
+                                "Record one window"
+                            } else {
+                                "Record multiple windows"
+                            })
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.select
+                                    .update(cx, |select, cx| select.toggle_multiple_windows(cx));
+                            })),
+                    )
+                },
+            )
             .child(
                 self.glass_surface().p(px(12.)).child(
                     div()

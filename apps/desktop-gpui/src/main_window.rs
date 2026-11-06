@@ -2399,6 +2399,8 @@ impl MainWindow {
             let kind = match &target {
                 ScreenCaptureTarget::Display { .. } => TargetType::Display,
                 ScreenCaptureTarget::Window { .. } => TargetType::Window,
+                #[cfg(target_os = "macos")]
+                ScreenCaptureTarget::Windows { .. } => TargetType::Window,
                 ScreenCaptureTarget::Area { .. } => TargetType::Area,
                 ScreenCaptureTarget::CameraOnly => TargetType::CameraOnly,
             };

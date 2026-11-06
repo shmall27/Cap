@@ -3309,6 +3309,9 @@ async fn create_segment_pipeline(
         None
     };
 
+    let custom_cursor_capture =
+        custom_cursor_capture && !base_inputs.capture_target.is_multi_window();
+    let keyboard_capture = keyboard_capture && !base_inputs.capture_target.is_multi_window();
     let camera_only = matches!(
         base_inputs.capture_target,
         screen_capture::ScreenCaptureTarget::CameraOnly
@@ -3438,6 +3441,9 @@ async fn create_segment_pipeline(
         )
         .await
         .context("screen capture init")?;
+
+        #[cfg(target_os = "macos")]
+        let screen_config = screen_config.with_windows(capture_target.windows())?;
 
         let screen_info = screen_config.info();
         let output_size = calculate_gpu_compatible_size(

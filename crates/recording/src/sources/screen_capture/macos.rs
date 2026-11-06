@@ -1,3 +1,6 @@
+#[path = "macos_multi.rs"]
+mod multi;
+
 use super::*;
 use crate::{
     ChannelAudioSourceConfig,
@@ -6,7 +9,7 @@ use crate::{
         SetupCtx,
     },
 };
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use cap_timestamp::Timestamp;
 use cidre::*;
 use futures::{FutureExt as _, channel::mpsc, future::BoxFuture};
@@ -395,7 +398,10 @@ impl ScreenCaptureConfig<CMSampleBufferCapture> {
             stall_health_tx: stall_health_tx.clone(),
         });
 
-        let builder = scap_screencapturekit::Capturer::builder(content_filter, settings)
+        let capturer = if !self.config.windows.is_empty() {
+            multi::build(rebuild_params.clone(), &self.shareable_content)?
+        } else {
+            let builder = scap_screencapturekit::Capturer::builder(content_filter, settings)
             .with_output_sample_buf_cb({
                 let video_frame_count = video_frame_counter.clone();
                 let drop_counter = drop_counter.clone();
@@ -580,8 +586,9 @@ impl ScreenCaptureConfig<CMSampleBufferCapture> {
                 }
             });
 
+            Capturer::new(Arc::new(builder.build()?))
+        };
         let cancel_token = CancellationToken::new();
-        let capturer = Capturer::new(Arc::new(builder.build()?));
 
         Ok((
             VideoSourceConfig {
@@ -623,14 +630,16 @@ pub struct CaptureError(pub arc::R<ns::Error>);
 
 struct Capturer {
     started: Arc<AtomicBool>,
-    capturer: Arc<scap_screencapturekit::Capturer>,
+    capturers: Vec<Arc<scap_screencapturekit::Capturer>>,
+    composite: Option<Arc<multi::Composite>>,
 }
 
 impl Clone for Capturer {
     fn clone(&self) -> Self {
         Self {
             started: self.started.clone(),
-            capturer: self.capturer.clone(),
+            capturers: self.capturers.clone(),
+            composite: self.composite.clone(),
             // error_rx: self.error_rx.resubscribe(),
         }
     }
@@ -640,12 +649,17 @@ impl Capturer {
     fn new(capturer: Arc<scap_screencapturekit::Capturer>) -> Self {
         Self {
             started: Arc::new(AtomicBool::new(false)),
-            capturer,
+            capturers: vec![capturer],
+            composite: None,
         }
     }
 
     fn mark_stopped(&self) {
-        self.started.store(false, atomic::Ordering::Relaxed);
+        if let Some(composite) = &self.composite {
+            composite.stop();
+        } else {
+            self.started.store(false, atomic::Ordering::Relaxed);
+        }
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -659,10 +673,18 @@ impl Capturer {
             )
             .is_ok()
         {
-            self.capturer
-                .start()
-                .await
-                .map_err(|err| anyhow!(format!("{err}")))?;
+            for (index, capturer) in self.capturers.iter().enumerate() {
+                if let Err(error) = capturer.start().await {
+                    for started in &self.capturers[..index] {
+                        let _ = started.stop().await;
+                    }
+                    self.started.store(false, atomic::Ordering::Relaxed);
+                    return Err(anyhow!("Could not start window capture: {error}"));
+                }
+            }
+            if let Some(composite) = &self.composite {
+                composite.start();
+            }
         }
 
         Ok(())
@@ -679,7 +701,18 @@ impl Capturer {
             )
             .is_ok()
         {
-            self.capturer.stop().await.context("capturer_stop")?;
+            if let Some(composite) = &self.composite {
+                composite.stop();
+            }
+            let mut failure = None;
+            for capturer in &self.capturers {
+                if let Err(error) = capturer.stop().await {
+                    failure = Some(anyhow!("capturer_stop: {error}"));
+                }
+            }
+            if let Some(error) = failure {
+                return Err(error);
+            }
         }
 
         Ok(())
@@ -788,6 +821,11 @@ impl output_pipeline::VideoSource for VideoSource {
                             stop_signal.mark_user_stopped();
                             pipeline_cancel.cancel();
                             break Ok(());
+                        }
+
+                        if !rebuild_params.config.windows.is_empty() {
+                            pipeline_cancel.cancel();
+                            return Err(anyhow!("A selected window stopped recording: {err}"));
                         }
 
                         if is_system_stop_error(err.as_ref()) {
@@ -1446,6 +1484,7 @@ mod tests {
             fps: 60,
             show_cursor: true,
             window,
+            windows: Vec::new(),
         }
     }
 

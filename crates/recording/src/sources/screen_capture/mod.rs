@@ -73,6 +73,10 @@ pub enum ScreenCaptureTarget {
         screen: DisplayId,
         bounds: LogicalBounds,
     },
+    #[cfg(all(target_os = "macos", feature = "multi-window"))]
+    Windows {
+        ids: Vec<WindowId>,
+    },
     CameraOnly,
 }
 
@@ -101,7 +105,29 @@ impl ScreenCaptureTarget {
             Self::Display { id } => Display::from_id(id),
             Self::Window { id } => Window::from_id(id).and_then(|w| w.display()),
             Self::Area { screen, .. } => Display::from_id(screen),
+            #[cfg(all(target_os = "macos", feature = "multi-window"))]
+            Self::Windows { ids } => ids
+                .first()
+                .and_then(Window::from_id)
+                .and_then(|w| w.display()),
             Self::CameraOnly => None,
+        }
+    }
+
+    pub fn is_multi_window(&self) -> bool {
+        #[cfg(all(target_os = "macos", feature = "multi-window"))]
+        if matches!(self, Self::Windows { .. }) {
+            return true;
+        }
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn windows(&self) -> Vec<WindowId> {
+        match self {
+            #[cfg(feature = "multi-window")]
+            Self::Windows { ids } => ids.clone(),
+            _ => Vec::new(),
         }
     }
 
@@ -233,6 +259,8 @@ impl ScreenCaptureTarget {
                     return Some(CursorCropBounds::new_linux(bounds));
                 }
             }
+            #[cfg(all(target_os = "macos", feature = "multi-window"))]
+            Self::Windows { .. } => None,
             Self::CameraOnly => None,
         }
     }
@@ -267,6 +295,8 @@ impl ScreenCaptureTarget {
                     )
                 }
             }
+            #[cfg(all(target_os = "macos", feature = "multi-window"))]
+            Self::Windows { .. } => Some(PhysicalSize::new(1920.0, 1080.0)),
             Self::CameraOnly => None,
         }
     }
@@ -276,6 +306,8 @@ impl ScreenCaptureTarget {
             Self::Display { id } => Display::from_id(id).and_then(|d| d.name()),
             Self::Window { id } => Window::from_id(id).and_then(|w| w.name()),
             Self::Area { screen, .. } => Display::from_id(screen).and_then(|d| d.name()),
+            #[cfg(all(target_os = "macos", feature = "multi-window"))]
+            Self::Windows { ids } => Some(format!("{} windows", ids.len())),
             Self::CameraOnly => Some("Camera".to_string()),
         }
     }
@@ -285,6 +317,8 @@ impl ScreenCaptureTarget {
             ScreenCaptureTarget::Display { .. } => "Display",
             ScreenCaptureTarget::Window { .. } => "Window",
             ScreenCaptureTarget::Area { .. } => "Area",
+            #[cfg(all(target_os = "macos", feature = "multi-window"))]
+            ScreenCaptureTarget::Windows { .. } => "Windows",
             ScreenCaptureTarget::CameraOnly => "Camera",
         }
     }
@@ -385,6 +419,8 @@ pub struct Config {
     /// Capture this window itself rather than a crop of its display.
     #[cfg(any(target_os = "macos", windows))]
     window: Option<WindowId>,
+    #[cfg(target_os = "macos")]
+    windows: Vec<WindowId>,
 }
 
 #[cfg(target_os = "macos")]
@@ -593,6 +629,8 @@ impl<TCaptureFormat: ScreenCaptureFormat> ScreenCaptureConfig<TCaptureFormat> {
                 linux_source,
                 #[cfg(any(target_os = "macos", windows))]
                 window,
+                #[cfg(target_os = "macos")]
+                windows: Vec::new(),
             },
             video_info: VideoInfo::from_raw_ffmpeg(
                 TCaptureFormat::pixel_format(),
@@ -615,6 +653,32 @@ impl<TCaptureFormat: ScreenCaptureFormat> ScreenCaptureConfig<TCaptureFormat> {
     #[cfg(windows)]
     pub fn d3d_device(&self) -> &::windows::Win32::Graphics::Direct3D11::ID3D11Device {
         &self.d3d_device
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn with_windows(mut self, windows: Vec<WindowId>) -> anyhow::Result<Self> {
+        if !windows.is_empty() {
+            anyhow::ensure!(
+                (2..=4).contains(&windows.len()),
+                "Select between two and four windows"
+            );
+            let mut unique = std::collections::HashSet::new();
+            anyhow::ensure!(
+                windows.iter().all(|id| unique.insert(id.to_string())),
+                "Select distinct windows"
+            );
+            anyhow::ensure!(
+                !windows.iter().any(|id| self.excluded_windows.contains(id)),
+                "A selected window is excluded from recording"
+            );
+            self.config.windows = windows;
+            self.config.window = None;
+            self.config.crop_bounds = None;
+            self.config.show_cursor = true;
+            self.video_info.width = 1920;
+            self.video_info.height = 1080;
+        }
+        Ok(self)
     }
 
     pub fn config(&self) -> &Config {

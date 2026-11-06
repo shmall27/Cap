@@ -1049,6 +1049,13 @@ fn target_is_live(target: &ScreenCaptureTarget) -> bool {
         ScreenCaptureTarget::Area { screen, .. } => {
             scap_targets::Display::from_id(screen).is_some()
         }
+        #[cfg(target_os = "macos")]
+        ScreenCaptureTarget::Windows { ids } => {
+            (2..=4).contains(&ids.len())
+                && ids
+                    .iter()
+                    .all(|id| scap_targets::Window::from_id(id).is_some())
+        }
         ScreenCaptureTarget::CameraOnly => true,
     }
 }
