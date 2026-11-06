@@ -3,7 +3,6 @@ import argparse
 import datetime
 import hashlib
 import json
-import os
 from pathlib import Path
 import platform
 import plistlib
@@ -61,7 +60,12 @@ def main():
     info["CapLocalBuildRevision"] = revision
     info["CapLocalBuildSourceSHA256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
     (staged / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
-    if "com.apple.quarantine" in os.listxattr(staged):
+    quarantine = subprocess.run(
+        ["xattr", "-p", "com.apple.quarantine", str(staged)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if quarantine.returncode == 0:
         run("xattr", "-dr", "com.apple.quarantine", str(staged))
     run(
         "codesign", "--force", "--sign", "-", "--options", "runtime",
