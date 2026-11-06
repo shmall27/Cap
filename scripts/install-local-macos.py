@@ -24,6 +24,14 @@ def require_cap_closed():
         raise SystemExit("Quit Cap before installing a local build.")
 
 
+def signing_requirement(app):
+    result = run("codesign", "-d", "-r-", str(app), capture_output=True, text=True)
+    for line in (result.stdout + result.stderr).splitlines():
+        if "designated => " in line:
+            return line.split("designated => ", 1)[1]
+    raise SystemExit(f"Could not read the signing requirement for {app}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build and install local Cap using the matching installed release's resources and sidecars."
@@ -77,6 +85,7 @@ def main():
         return
 
     require_cap_closed()
+    signing_changed = signing_requirement(installed) != signing_requirement(staged)
     backup_root = Path.home() / "Library/Application Support/Cap Local Builds"
     backup = backup_root / datetime.datetime.now().strftime("install-%Y%m%d-%H%M%S-%f")
     backup.mkdir(parents=True)
@@ -101,6 +110,10 @@ def main():
         raise
     (backup_root / "latest-backup.txt").write_text(str(backup) + "\n")
     print(f"Installed: {installed}\nBackup: {backup}\nAutomatic update checks: disabled")
+    if signing_changed:
+        run("tccutil", "reset", "All", info["CFBundleIdentifier"])
+        print("Signing identity changed: cleared Cap's stale privacy grants.")
+        print("Reopen Cap and grant Screen Recording and Accessibility access again.")
 
 
 if __name__ == "__main__":
